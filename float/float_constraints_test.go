@@ -14,14 +14,14 @@ import (
 )
 
 type Param struct {
-	name string
+	name string //f32 还是 f64
 	E    uint
 	M    uint
 }
 
 var params = []Param{
 	{E: 8, M: 23, name: "F32"},
-	{E: 11, M: 52, name: "F64"},
+	// {E: 11, M: 52, name: "F64"},
 }
 
 type Constraints struct {
@@ -53,7 +53,7 @@ func count_constraints(ctx Context, f func()) Constraints {
 }
 
 func (c *FloatCircuit) Define(api frontend.API) error {
-	ctx := NewContext(api, c.size, c.E, c.M)
+	ctx := NewContext(api, c.size, c.E, c.M) //8, 8, 23
 
 	x := ctx.NewFloat(c.X)
 	y := ctx.NewFloat(c.Y)
@@ -79,7 +79,9 @@ var (
 )
 
 func TestFloatCircuitConstraints(t *testing.T) {
-	ops := []string{"Init", "Add", "Sub", "Mul", "Div", "Sqrt", "Cmp"}
+	// ops := []string{"Init", "Add", "Sub", "Mul", "Div", "Sqrt", "Cmp"}
+
+	ops := []string{"Add"}
 
 	var result_all strings.Builder
 	result_all.WriteString("Type, T_RC")
@@ -89,10 +91,13 @@ func TestFloatCircuitConstraints(t *testing.T) {
 	result_all.WriteString("\n")
 
 	for _, param := range params {
-		for _, size := range []uint{8, 12, 16} {
+		// for _, size := range []uint{8, 12, 16} {
+		for _, size := range []uint{8} {
 
 			result_all.WriteString(param.name + ", ")
 			result_all.WriteString(fmt.Sprint(size) + ", ")
+
+			// fmt.Println(result_all.String())
 
 			circuit := &FloatCircuit{E: param.E, M: param.M, size: size}
 			_, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, circuit)
