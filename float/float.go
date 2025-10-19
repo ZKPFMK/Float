@@ -1,6 +1,7 @@
 package float
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 
@@ -14,11 +15,11 @@ import (
 type Context struct {
 	Api          frontend.API
 	Gadget       *gadget.IntGadget
-	E            uint // The number of bits in the encoded exponent
-	M            uint // The number of bits in the encoded mantissa
-	E_MAX        *big.Int
-	E_NORMAL_MIN *big.Int
-	E_MIN        *big.Int
+	E            uint     // The number of bits in the encoded exponent, 8
+	M            uint     // The number of bits in the encoded mantissa, 23
+	E_MAX        *big.Int // 128
+	E_NORMAL_MIN *big.Int // -126
+	E_MIN        *big.Int // -150
 }
 
 // `FloatVar` represents an IEEE-754 floating point number in the constraint system,
@@ -47,10 +48,12 @@ type FloatVar struct {
 	IsAbnormal frontend.Variable
 }
 
+// 使用单精度还是双精度
+// range_size=8, E=8, M=23
 func NewContext(api frontend.API, range_size uint, E, M uint) Context {
-	E_MAX := new(big.Int).Lsh(big.NewInt(1), E-1)
-	E_NORMAL_MIN := new(big.Int).Sub(big.NewInt(2), E_MAX)
-	E_MIN := new(big.Int).Sub(E_NORMAL_MIN, big.NewInt(int64(M+1)))
+	E_MAX := new(big.Int).Lsh(big.NewInt(1), E-1)                   //128
+	E_NORMAL_MIN := new(big.Int).Sub(big.NewInt(2), E_MAX)          //-126
+	E_MIN := new(big.Int).Sub(E_NORMAL_MIN, big.NewInt(int64(M+1))) //-150
 	return Context{
 		Api:          api,
 		Gadget:       gadget.New(api, range_size, M+E+1),
@@ -65,6 +68,7 @@ func NewContext(api frontend.API, range_size uint, E, M uint) Context {
 // Allocate a variable in the constraint system from a value.
 // This function decomposes the value into sign, exponent, and mantissa,
 // and enforces they are well-formed.
+// v => (s, e, m, a)
 func (f *Context) NewFloat(v frontend.Variable) FloatVar {
 	// Extract sign, exponent, and mantissa from the value
 	outputs, err := f.Api.Compiler().NewHint(hint.DecodeFloatHint, 2, v, f.E, f.M)
@@ -73,6 +77,8 @@ func (f *Context) NewFloat(v frontend.Variable) FloatVar {
 	}
 	s := outputs[0]
 	e := outputs[1]
+	/***************证明(v, s, e, m)的正确性***********************/
+	//v - s * (1 << (E + M)) - e * (1 << M) = m
 	m := f.Api.Sub(v, f.Api.Add(f.Api.Mul(s, new(big.Int).Lsh(big.NewInt(1), f.E+f.M)), f.Api.Mul(e, new(big.Int).Lsh(big.NewInt(1), f.M))))
 
 	// Enforce the bit length of sign, exponent and mantissa
@@ -80,17 +86,17 @@ func (f *Context) NewFloat(v frontend.Variable) FloatVar {
 	f.Gadget.AssertBitLength(e, f.E, gadget.TightForUnknownRange)
 	f.Gadget.AssertBitLength(m, f.M, gadget.TightForUnknownRange)
 
-	exponent_min := new(big.Int).Sub(f.E_NORMAL_MIN, big.NewInt(1))
-	exponent_max := f.E_MAX
+	exponent_min := new(big.Int).Sub(f.E_NORMAL_MIN, big.NewInt(1)) //-127
+	exponent_max := f.E_MAX                                         //128
 
-	// Compute the unbiased exponent
+	// Compute the unbiased exponent, e - 127
 	exponent := f.Api.Add(e, exponent_min)
 
-	mantissa_is_zero := f.Api.IsZero(m)
-	mantissa_is_not_zero := f.Api.Sub(big.NewInt(1), mantissa_is_zero)
+	mantissa_is_zero := f.Api.IsZero(m)                                //m == 0
+	mantissa_is_not_zero := f.Api.Sub(big.NewInt(1), mantissa_is_zero) // 1- m
 	f.Api.Compiler().MarkBoolean(mantissa_is_not_zero)
-	exponent_is_min := f.Gadget.IsEq(exponent, exponent_min)
-	exponent_is_max := f.Gadget.IsEq(exponent, exponent_max)
+	exponent_is_min := f.Gadget.IsEq(exponent, exponent_min) //e == 0
+	exponent_is_max := f.Gadget.IsEq(exponent, exponent_max) //e == 255
 
 	// Find how many bits to shift the mantissa to the left to have the `(M - 1)`-th bit equal to 1
 	// and prodive it as a hint to the circuit
@@ -207,11 +213,15 @@ func (f *Context) round(
 	// Enforce that `two_to_shift` is equal to `2^shift`, where `shift` is known to be small.
 	two_to_shift := f.Gadget.QueryPowerOf2(shift)
 
-	r_idx := shift_max + mantissa_bit_length - f.M - 2
-	q_idx := r_idx + 1
-	p_idx := q_idx + 1
-	p_len := f.M
-	s_len := r_idx
+	fmt.Printf("shift=%v, shift_max=%v, mantissa_bit_length=%v\n", shift, shift_max, mantissa_bit_length)
+
+	r_idx := shift_max + mantissa_bit_length - f.M - 2 // N - M + K - 2, s的长度
+	q_idx := r_idx + 1                                 // r||s的长度
+	p_idx := q_idx + 1                                 // q||r||s的长度
+	p_len := f.M                                       // p的长度
+	s_len := r_idx                                     // s的长度
+
+	fmt.Printf("s_len=%v, p_len=%v, p_idx=%v, q_idx=%v, r_idx=%v\n", s_len, p_len, p_idx, q_idx, r_idx)
 
 	// Rewrite the shifted mantissa as `p || q || r || s` (big-endian), where
 	// * `p` has `M` bits
@@ -233,6 +243,8 @@ func (f *Context) round(
 	q := outputs[1]
 	r := outputs[2]
 	s := outputs[3]
+
+	fmt.Printf("p=%v, q=%v, r=%v, s=%v\n", p, q, r, s)
 
 	// Enforce the bit length of `p`, `q`, `r` and `s`
 	f.Api.AssertIsBoolean(q)
@@ -261,7 +273,7 @@ func (f *Context) round(
 	// Also, we use `half_flag` to allow the caller to specify the rounding direction.
 	is_half := f.Api.And(f.Gadget.IsEq(rs, new(big.Int).Lsh(big.NewInt(1), r_idx)), half_flag)
 	carry := f.Api.Select(is_half, q, r)
-
+	fmt.Printf("is_half=%v, carry=%v\n", is_half, carry)
 	// Round the mantissa according to `carry` and shift it back to the original position.
 	return f.Api.Mul(f.Api.Add(pq, carry), two_to_shift)
 }
@@ -469,10 +481,11 @@ func (f *Context) Add(x, y FloatVar) FloatVar {
 	// As discussed in `Self::round`, we can shift left by `M + 3 - min(delta, M + 3) = max(M + 3 - delta, 0)`
 	// bits instead of shifting right by `min(delta, M + 3)` bits in order to save constraints.
 	delta = f.Gadget.Max(
-		f.Api.Sub(f.M+3, delta),
+		f.Api.Sub(f.M+3, delta), /*这里可以修改M+3->M+2*/
 		big.NewInt(0),
 		f.E,
 	)
+
 	// Enforce that `two_to_delta` is equal to `2^delta`, where `delta` is known to be small.
 	two_to_delta := f.Gadget.QueryPowerOf2(delta)
 
@@ -505,11 +518,11 @@ func (f *Context) Add(x, y FloatVar) FloatVar {
 	// and `ww << (M + 3)` has `E_NORMAL_MIN - y.exponent + M + 3` trailing 0s.
 	// This implies that `s` also has `E_NORMAL_MIN - y.exponent + M + 3` trailing 0s.
 	// Generally, `s` should have `max(E_NORMAL_MIN - max(x.exponent, y.exponent), 0) + M + 3` trailing 0s.
-	s := f.Api.Add(f.Api.Mul(zz, two_to_delta), f.Api.Mul(ww, new(big.Int).Lsh(big.NewInt(1), f.M+3)))
+	s := f.Api.Add(f.Api.Mul(zz, two_to_delta), f.Api.Mul(ww, new(big.Int).Lsh(big.NewInt(1), f.M+3))) /*这里可以修改M+3->M+2*/
 
 	// The shift count is at most `M + 3`, and both `zz` and `ww` have `M + 1` bits, hence the result has at most
 	// `(M + 3) + (M + 1) + 1` bits, where 1 is the possible carry.
-	mantissa_bit_length := (f.M + 3) + (f.M + 1) + 1
+	mantissa_bit_length := (f.M + 3) + (f.M + 1) + 1 /*这里可以修改M+3->M+2*/
 
 	// Get the sign of the mantissa and find how many bits to shift the mantissa to the left to have the
 	// `mantissa_bit_length - 1`-th bit equal to 1.
@@ -520,6 +533,7 @@ func (f *Context) Add(x, y FloatVar) FloatVar {
 	}
 	mantissa_ge_0 := outputs[0]
 	mantissa_abs := outputs[1]
+
 	f.Api.AssertIsBoolean(mantissa_ge_0)
 	mantissa_lt_0 := f.Api.Sub(big.NewInt(1), mantissa_ge_0)
 	f.Api.Compiler().MarkBoolean(mantissa_lt_0)
@@ -604,7 +618,7 @@ func (f *Context) Add(x, y FloatVar) FloatVar {
 	y_is_not_abnormal := f.Api.Sub(big.NewInt(1), y.IsAbnormal)
 	f.Api.Compiler().MarkBoolean(y_is_not_abnormal)
 
-	return FloatVar{
+	ret := FloatVar{
 		Sign:     sign,
 		Exponent: exponent,
 		// Rule of addition:
@@ -639,6 +653,7 @@ func (f *Context) Add(x, y FloatVar) FloatVar {
 		),
 		IsAbnormal: is_abnormal,
 	}
+	return ret
 }
 
 // Compute the absolute value of the number.

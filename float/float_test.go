@@ -14,6 +14,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/consensys/gnark/test"
 )
 
@@ -163,6 +164,23 @@ func (c *F64ConversionCircuit) Define(api frontend.API) error {
 	return nil
 }
 
+func TestF32Shape(t *testing.T) {
+	assert := test.NewAssert(t)
+
+	// 1) 编译电路
+	var circuit FloatCircuit = FloatCircuit{E: 8, M: 23, size: 0} // ← 与下面 assignment 的类型保持一致
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
+	assert.NoError(err)
+
+	// 2) 准备 witness（只需一次）
+	assignment := FloatCircuit{X: 0x8683F7FF, Y: 0xC07F3FFF, E: 8, M: 23, size: 0}
+	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
+	assert.NoError(err)
+
+	// 3) 只检查约束是否满足（不做证明）
+	assert.NoError(ccs.IsSolved(witness))
+}
+
 func TestF32UnaryCircuit(t *testing.T) {
 	assert := test.NewAssert(t)
 
@@ -190,21 +208,25 @@ func TestF32UnaryCircuit(t *testing.T) {
 }
 
 func TestF32BinaryCircuit(t *testing.T) {
-	// assert := test.NewAssert(t)
+	assert := test.NewAssert(t)
 
 	// ops := []string{"Add", "Sub", "Mul", "Div"}
-	ops := []string{"Add"}
+	ops := []string{"Mul"}
+
 	for _, op := range ops {
 		path, _ := filepath.Abs(fmt.Sprintf("../data/f32/%s", strings.ToLower(op)))
 		file, _ := os.Open(path)
 		defer file.Close()
 
+		type triple struct{ a, b, c string }
+		var cases []triple
+
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			data := strings.Fields(scanner.Text())
-			a, _ := new(big.Int).SetString(data[0], 16)
-			b, _ := new(big.Int).SetString(data[1], 16)
-			c, _ := new(big.Int).SetString(data[2], 16)
+			// a, _ := new(big.Int).SetString(data[0], 16)
+			// b, _ := new(big.Int).SetString(data[1], 16)
+			// c, _ := new(big.Int).SetString(data[2], 16)
 
 			// assert.ProverSucceeded(
 			// 	&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: op},
@@ -213,15 +235,25 @@ func TestF32BinaryCircuit(t *testing.T) {
 			// 	test.WithBackends(backend.GROTH16, backend.PLONK),
 			// )
 
-			err := test.IsSolved(
-				&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: op},
-				&F32BinaryCircuit{X: a, Y: b, Z: c, op: op},
-				ecc.BN254.ScalarField(),
-			)
-			if err != nil {
-				t.Errorf("❌ witness not satisfied for op=%s:\nA=%s\nB=%s\nC=%s\nError: %v\n",
-					op, a.Text(16), b.Text(16), c.Text(16), err)
-			}
+			cases = append(cases, triple{data[0], data[1], data[2]})
+		}
+
+		for i, tc := range cases {
+			tc := tc
+			t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
+				t.Parallel() // 并行子测试
+
+				a, _ := new(big.Int).SetString(tc.a, 16)
+				b, _ := new(big.Int).SetString(tc.b, 16)
+				c, _ := new(big.Int).SetString(tc.c, 16)
+
+				assert.ProverSucceeded(
+					&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: op},
+					&F32BinaryCircuit{X: a, Y: b, Z: c, op: op},
+					test.WithCurves(ecc.BN254),
+					test.WithBackends(backend.GROTH16),
+				)
+			})
 		}
 	}
 }

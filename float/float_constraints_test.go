@@ -14,9 +14,9 @@ import (
 )
 
 type Param struct {
-	name string //f32 还是 f64
-	E    uint
-	M    uint
+	name string //f32还是f64
+	E    uint   //指数bit长度
+	M    uint   //尾数bit长度
 }
 
 var params = []Param{
@@ -33,27 +33,14 @@ type Constraints struct {
 type FloatCircuit struct {
 	X      frontend.Variable `gnark:",secret"`
 	Y      frontend.Variable `gnark:",secret"`
-	E      uint
-	M      uint
-	size   uint
+	E      uint              //8
+	M      uint              //23
+	size   uint              //8
 	result []Constraints
 }
 
-func count_constraints(ctx Context, f func()) Constraints {
-	native_constraints := ctx.Api.GetNbConstraints()
-	lookup_query_constraints := ctx.Gadget.LookupQueryConstraints()
-	f()
-	native_constraints = ctx.Api.GetNbConstraints() - native_constraints
-	lookup_query_constraints = ctx.Gadget.LookupQueryConstraints() - lookup_query_constraints
-	return Constraints{
-		uint(native_constraints),
-		lookup_query_constraints,
-		ctx.Gadget.LookupEntryConstraints() + ctx.Gadget.LookupFinalizeConstraints(),
-	}
-}
-
 func (c *FloatCircuit) Define(api frontend.API) error {
-	ctx := NewContext(api, c.size, c.E, c.M) //8, 8, 23
+	ctx := NewContext(api, c.size, c.E, c.M)
 
 	x := ctx.NewFloat(c.X)
 	y := ctx.NewFloat(c.Y)
@@ -73,15 +60,26 @@ func (c *FloatCircuit) Define(api frontend.API) error {
 	return nil
 }
 
+func count_constraints(ctx Context, f func()) Constraints {
+	native_constraints := ctx.Api.GetNbConstraints()
+	lookup_query_constraints := ctx.Gadget.LookupQueryConstraints()
+	f()
+	native_constraints = ctx.Api.GetNbConstraints() - native_constraints
+	lookup_query_constraints = ctx.Gadget.LookupQueryConstraints() - lookup_query_constraints
+	return Constraints{
+		uint(native_constraints),
+		lookup_query_constraints,
+		ctx.Gadget.LookupEntryConstraints() + ctx.Gadget.LookupFinalizeConstraints(),
+	}
+}
+
 var (
 	_, b, _, _ = runtime.Caller(0)
 	basepath   = filepath.Dir(b)
 )
 
 func TestFloatCircuitConstraints(t *testing.T) {
-	// ops := []string{"Init", "Add", "Sub", "Mul", "Div", "Sqrt", "Cmp"}
-
-	ops := []string{"Add"}
+	ops := []string{"Init", "Add", "Sub", "Mul", "Div", "Sqrt", "Cmp"}
 
 	var result_all strings.Builder
 	result_all.WriteString("Type, T_RC")
@@ -91,13 +89,10 @@ func TestFloatCircuitConstraints(t *testing.T) {
 	result_all.WriteString("\n")
 
 	for _, param := range params {
-		// for _, size := range []uint{8, 12, 16} {
-		for _, size := range []uint{8} {
+		for _, size := range []uint{8, 12, 16} {
 
 			result_all.WriteString(param.name + ", ")
 			result_all.WriteString(fmt.Sprint(size) + ", ")
-
-			// fmt.Println(result_all.String())
 
 			circuit := &FloatCircuit{E: param.E, M: param.M, size: size}
 			_, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, circuit)
