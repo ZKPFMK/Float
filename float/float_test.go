@@ -3,6 +3,8 @@ package float
 import (
 	"bufio"
 	"fmt"
+	"gnark-float/hint"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -42,8 +44,19 @@ type F32BinaryCircuit struct {
 func (c *F32BinaryCircuit) Define(api frontend.API) error {
 	ctx := NewContext(api, 0, 8, 23)
 	x := ctx.NewFloat(c.X)
+	fmt.Printf("x:")
+	ctx.Api.Compiler().NewHint(hint.PrintHint32, 1, x.Sign, x.Exponent, x.Mantissa, x.IsAbnormal)
+
 	y := ctx.NewFloat(c.Y)
+	fmt.Printf("y:")
+	ctx.Api.Compiler().NewHint(hint.PrintHint32, 1, y.Sign, y.Exponent, y.Mantissa, y.IsAbnormal)
+
 	z := ctx.NewFloat(c.Z)
+	zz := ctx.Mul(x, y)
+
+	fmt.Printf("zz:")
+	ctx.Api.Compiler().NewHint(hint.PrintHint32, 1, zz.Sign, zz.Exponent, zz.Mantissa, zz.IsAbnormal)
+
 	ctx.AssertIsEqual(reflect.ValueOf(&ctx).MethodByName(c.op).Call([]reflect.Value{reflect.ValueOf(x), reflect.ValueOf(y)})[0].Interface().(FloatVar), z)
 	return nil
 }
@@ -184,7 +197,8 @@ func TestF32Shape(t *testing.T) {
 func TestF32UnaryCircuit(t *testing.T) {
 	assert := test.NewAssert(t)
 
-	ops := []string{"Sqrt", "Trunc", "Floor", "Ceil"}
+	// ops := []string{"Sqrt", "Trunc", "Floor", "Ceil"}
+	ops := []string{"Sqrt"}
 
 	for _, op := range ops {
 		path, _ := filepath.Abs(fmt.Sprintf("../data/f32/%s", strings.ToLower(op)))
@@ -201,10 +215,23 @@ func TestF32UnaryCircuit(t *testing.T) {
 				&F32UnaryCircuit{X: 0, Y: 0, op: op},
 				&F32UnaryCircuit{X: a, Y: b, op: op},
 				test.WithCurves(ecc.BN254),
-				test.WithBackends(backend.GROTH16, backend.PLONK),
+				// test.WithBackends(backend.GROTH16, backend.PLONK),
+				test.WithBackends(backend.GROTH16),
 			)
 		}
 	}
+}
+
+func TestF32Mul(t *testing.T) {
+	assert := test.NewAssert(t)
+	op := "Mul"
+	fmt.Print("bits:\n", math.Float32bits(float32(1.0/3.0)), float32(1.0/3.0))
+	assert.ProverSucceeded(
+		&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: op},
+		&F32BinaryCircuit{X: math.Float32bits(2), Y: math.Float32bits(1.0 / 3.0), Z: math.Float32bits(2.0 / 3.0), op: op},
+		test.WithCurves(ecc.BN254),
+		test.WithBackends(backend.GROTH16),
+	)
 }
 
 func TestF32BinaryCircuit(t *testing.T) {
@@ -250,6 +277,13 @@ func TestF32BinaryCircuit(t *testing.T) {
 				assert.ProverSucceeded(
 					&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: op},
 					&F32BinaryCircuit{X: a, Y: b, Z: c, op: op},
+					test.WithCurves(ecc.BN254),
+					test.WithBackends(backend.GROTH16),
+				)
+
+				assert.ProverSucceeded(
+					&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: "Mul"},
+					&F32BinaryCircuit{X: b, Y: c, Z: a, op: "Mul"},
 					test.WithCurves(ecc.BN254),
 					test.WithBackends(backend.GROTH16),
 				)

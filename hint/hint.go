@@ -1,6 +1,7 @@
 package hint
 
 import (
+	"fmt"
 	"gnark-float/util"
 	"math"
 	"math/big"
@@ -21,6 +22,15 @@ func init() {
 	solver.RegisterHint(FloorHint)
 	solver.RegisterHint(PrecomputeHint64)
 	solver.RegisterHint(PrecomputeHint32)
+	solver.RegisterHint(PrintHint32)
+}
+
+func PrintHint32(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	value := util.ComponentsToF32(inputs)
+	outputs[0].SetUint64(0)
+	fmt.Printf("s=%v, e=%v, m=%v\n", inputs[0].Text(2), inputs[1].Text(2), inputs[2].Text(2))
+	fmt.Printf("f32=%g\n", value)
+	return nil
 }
 
 func PrecomputeHint64(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
@@ -111,7 +121,7 @@ func DecodeFloatHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) erro
 	M := inputs[2].Uint64()
 	s := v >> (E + M)
 	e := (v >> M) - (s << E)
-
+	fmt.Printf("v:%v, e:%v\n", v, e)
 	outputs[0].SetUint64(s)
 	outputs[1].SetUint64(e)
 	return nil
@@ -120,7 +130,6 @@ func DecodeFloatHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) erro
 func NthBitHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 	v := new(big.Int).Set(inputs[0])
 	n := int(inputs[1].Uint64())
-
 	outputs[0].SetUint64(uint64(v.Bit(n)))
 	return nil
 }
@@ -195,6 +204,7 @@ func AbsHint(
 	return nil
 }
 
+// (x << Q) / y
 func DivHint(
 	field *big.Int,
 	inputs []*big.Int,

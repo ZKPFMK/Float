@@ -1,7 +1,6 @@
 package float
 
 import (
-	"fmt"
 	"math"
 	"math/big"
 
@@ -183,6 +182,30 @@ func (f *Context) NewConstant(v uint64) FloatVar {
 	}
 }
 
+func NewF32Constant(v float32) FloatVar {
+	components := util.ComponentsOf(uint64(math.Float32bits(v)), 8, 23)
+	return FloatVar{
+		Sign:       components[0],
+		Exponent:   components[1],
+		Mantissa:   components[2],
+		IsAbnormal: components[3],
+	}
+}
+
+// func ResolveF32(v FloatVar) float32 {
+// 	// a, _ := frontend.API.ConstantValue(v.Sign)
+// 	// b, _ := frontend.API.ConstantValue(v.Exponent)
+// 	// c, _ := frontend.API.ConstantValue(v.Mantissa)
+// 	// d, _ := frontend.API.ConstantValue(v.IsAbnormal)
+// 	// return util.ComponentsToF32(
+// 	// 	[]*big.Int{
+// 	// 		a, b, c, d,
+// 	// 	},
+// 	// )
+
+// 	var a = v.Exponen
+// }
+
 func (f *Context) NewF32Constant(v float32) FloatVar {
 	return f.NewConstant(uint64(math.Float32bits(v)))
 }
@@ -203,6 +226,7 @@ func (f *Context) NewF64Constant(v float64) FloatVar {
 // reduce the number of constraints.
 // `half_flag` is a flag that indicates whether we should determine the rounding direction according
 // to the equality between the remainder and 1/2.
+// 获取前M - \delta{e} + 1位并加上carry, 返回左移\delta{e}位的结果
 func (f *Context) round(
 	mantissa frontend.Variable,
 	mantissa_bit_length uint,
@@ -213,15 +237,11 @@ func (f *Context) round(
 	// Enforce that `two_to_shift` is equal to `2^shift`, where `shift` is known to be small.
 	two_to_shift := f.Gadget.QueryPowerOf2(shift)
 
-	fmt.Printf("shift=%v, shift_max=%v, mantissa_bit_length=%v\n", shift, shift_max, mantissa_bit_length)
-
 	r_idx := shift_max + mantissa_bit_length - f.M - 2 // N - M + K - 2, s的长度
 	q_idx := r_idx + 1                                 // r||s的长度
 	p_idx := q_idx + 1                                 // q||r||s的长度
 	p_len := f.M                                       // p的长度
 	s_len := r_idx                                     // s的长度
-
-	fmt.Printf("s_len=%v, p_len=%v, p_idx=%v, q_idx=%v, r_idx=%v\n", s_len, p_len, p_idx, q_idx, r_idx)
 
 	// Rewrite the shifted mantissa as `p || q || r || s` (big-endian), where
 	// * `p` has `M` bits
@@ -243,8 +263,6 @@ func (f *Context) round(
 	q := outputs[1]
 	r := outputs[2]
 	s := outputs[3]
-
-	fmt.Printf("p=%v, q=%v, r=%v, s=%v\n", p, q, r, s)
 
 	// Enforce the bit length of `p`, `q`, `r` and `s`
 	f.Api.AssertIsBoolean(q)
@@ -273,12 +291,13 @@ func (f *Context) round(
 	// Also, we use `half_flag` to allow the caller to specify the rounding direction.
 	is_half := f.Api.And(f.Gadget.IsEq(rs, new(big.Int).Lsh(big.NewInt(1), r_idx)), half_flag)
 	carry := f.Api.Select(is_half, q, r)
-	fmt.Printf("is_half=%v, carry=%v\n", is_half, carry)
+
 	// Round the mantissa according to `carry` and shift it back to the original position.
 	return f.Api.Mul(f.Api.Add(pq, carry), two_to_shift)
 }
 
 // Fix mantissa and exponent overflow.
+// 判断round后的结果是否有overflow, 如果有则e=e+1, m>=1
 func (f *Context) fixOverflow(
 	mantissa frontend.Variable,
 	mantissa_is_zero frontend.Variable,
@@ -744,7 +763,6 @@ func (f *Context) Mul(x, y FloatVar) FloatVar {
 		shift_max,
 		1,
 	)
-
 	mantissa_is_zero := f.Api.IsZero(mantissa)
 	input_is_abnormal := f.Api.Or(x.IsAbnormal, y.IsAbnormal)
 	mantissa, exponent, is_abnormal := f.fixOverflow(
@@ -790,7 +808,7 @@ func (f *Context) Div(x, y FloatVar) FloatVar {
 	if err != nil {
 		panic(err)
 	}
-	mantissa := outputs[0]
+	mantissa := outputs[0] //quotient
 	outputs, err = f.Api.Compiler().NewHint(hint.NthBitHint, 1, mantissa, big.NewInt(int64(f.M+2)))
 	if err != nil {
 		panic(err)
@@ -877,6 +895,7 @@ func (f *Context) Sqrt(x FloatVar) FloatVar {
 	if delta.Bit(0) == 1 {
 		delta = new(big.Int).Sub(delta, big.NewInt(1))
 	}
+
 	// Get the LSB of the exponent and provide it as a hint to the circuit.
 	outputs, err := f.Api.Compiler().NewHint(hint.NthBitHint, 1, f.Api.Sub(x.Exponent, delta), 0)
 	if err != nil {
