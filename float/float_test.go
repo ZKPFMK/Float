@@ -6,12 +6,14 @@ import (
 	"gnark-float/hint"
 	"math"
 	"math/big"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend"
@@ -44,17 +46,13 @@ type F32BinaryCircuit struct {
 func (c *F32BinaryCircuit) Define(api frontend.API) error {
 	ctx := NewContext(api, 0, 8, 23)
 	x := ctx.NewFloat(c.X)
-	fmt.Printf("x:")
 	ctx.Api.Compiler().NewHint(hint.PrintHint32, 1, x.Sign, x.Exponent, x.Mantissa, x.IsAbnormal)
 
 	y := ctx.NewFloat(c.Y)
-	fmt.Printf("y:")
 	ctx.Api.Compiler().NewHint(hint.PrintHint32, 1, y.Sign, y.Exponent, y.Mantissa, y.IsAbnormal)
 
 	z := ctx.NewFloat(c.Z)
 	zz := ctx.Mul(x, y)
-
-	fmt.Printf("zz:")
 	ctx.Api.Compiler().NewHint(hint.PrintHint32, 1, zz.Sign, zz.Exponent, zz.Mantissa, zz.IsAbnormal)
 
 	ctx.AssertIsEqual(reflect.ValueOf(&ctx).MethodByName(c.op).Call([]reflect.Value{reflect.ValueOf(x), reflect.ValueOf(y)})[0].Interface().(FloatVar), z)
@@ -222,16 +220,40 @@ func TestF32UnaryCircuit(t *testing.T) {
 	}
 }
 
+func TestF32Exp(t *testing.T) {
+	rand.Seed(time.Now().UnixNano())
+	x := -rand.Float64()
+	bx := math.Float64bits(x)
+	y := math.Exp(x)
+	by := math.Float64bits(y)
+	fmt.Printf("bin:%v\n", bx)
+	fmt.Printf("x = %v\n", x)
+	fmt.Printf("y1 = %v\n", y)
+	fmt.Printf("y1 = %v\n", by)
+	math.Exp(10.0)
+	r := 0.0
+	s := 0.0
+	var z float64 = r + s
+	fmt.Printf("t:%v", z)
+
+}
+
 func TestF32Mul(t *testing.T) {
 	assert := test.NewAssert(t)
 	op := "Mul"
-	fmt.Print("bits:\n", math.Float32bits(float32(1.0/3.0)), float32(1.0/3.0))
-	assert.ProverSucceeded(
-		&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: op},
-		&F32BinaryCircuit{X: math.Float32bits(2), Y: math.Float32bits(1.0 / 3.0), Z: math.Float32bits(2.0 / 3.0), op: op},
-		test.WithCurves(ecc.BN254),
-		test.WithBackends(backend.GROTH16),
-	)
+	fx := float32(2.0)
+	fy := float32(1.0) / float32(3.0)
+	fz := float32(2.0) / float32(3.0)
+	x := new(big.Int).SetUint64(uint64(math.Float32bits(fx)))
+	y := new(big.Int).SetUint64(uint64(math.Float32bits(fy)))
+	z := new(big.Int).SetUint64(uint64(math.Float32bits(fz)))
+
+	assert.NoError(
+		test.IsSolved(
+			&F32BinaryCircuit{X: 0, Y: 0, Z: 0, op: op},
+			&F32BinaryCircuit{X: x, Y: y, Z: z, op: op},
+			ecc.BN254.ScalarField(),
+		))
 }
 
 func TestF32BinaryCircuit(t *testing.T) {

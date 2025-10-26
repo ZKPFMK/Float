@@ -23,13 +23,40 @@ func init() {
 	solver.RegisterHint(PrecomputeHint64)
 	solver.RegisterHint(PrecomputeHint32)
 	solver.RegisterHint(PrintHint32)
+	solver.RegisterHint(BitsHint)
+
 }
 
 func PrintHint32(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
-	value := util.ComponentsToF32(inputs)
-	outputs[0].SetUint64(0)
-	fmt.Printf("s=%v, e=%v, m=%v\n", inputs[0].Text(2), inputs[1].Text(2), inputs[2].Text(2))
-	fmt.Printf("f32=%g\n", value)
+	s := inputs[0].Int64()
+	e := inputs[1].Int64()
+	m := inputs[2].Int64()
+	a := inputs[3].Int64()
+
+	if e == 0 {
+		if m != 0 {
+			panic("")
+		}
+		fmt.Println("+0, -0")
+	} else if e < 24 {
+		if (m>>e)<<e != m {
+			panic("")
+		}
+		m >>= e
+		e = 0
+		f := math.Float32frombits(uint32((s << 31) + (e << 23) + m))
+		fmt.Printf("subnormal f:%v\n", f)
+	} else if e < 277 {
+		m &= (1 << 23) - 1
+		e -= 23
+		f := math.Float32frombits(uint32((s << 31) + (e << 23) + m))
+		fmt.Printf("normal f:%v\n", f)
+	} else if e == 278 {
+		if a != 1 {
+			panic("")
+		}
+		fmt.Println("+Infinity, -Infinity, NaA")
+	}
 	return nil
 }
 
@@ -115,13 +142,13 @@ func PrecomputeHint32(field *big.Int, inputs []*big.Int, outputs []*big.Int) err
 	return nil
 }
 
+// 从v中提取s, e
 func DecodeFloatHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 	v := inputs[0].Uint64()
 	E := inputs[1].Uint64()
 	M := inputs[2].Uint64()
 	s := v >> (E + M)
 	e := (v >> M) - (s << E)
-	fmt.Printf("v:%v, e:%v\n", v, e)
 	outputs[0].SetUint64(s)
 	outputs[1].SetUint64(e)
 	return nil
@@ -258,5 +285,15 @@ func FloorHint(
 		outputs[0].Add(outputs[0], big.NewInt(1))
 	}
 
+	return nil
+}
+
+// v: 整数, n: 比特长度
+func BitsHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	v := new(big.Int).Set(inputs[0])
+	n := int(inputs[1].Uint64())
+	for i := 0; i < n; i++ {
+		outputs[i].SetUint64(uint64(v.Bit(i)))
+	}
 	return nil
 }

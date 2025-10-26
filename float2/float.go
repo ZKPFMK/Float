@@ -1,4 +1,4 @@
-package float
+package float2
 
 import (
 	"math"
@@ -6,53 +6,50 @@ import (
 
 	"github.com/consensys/gnark/frontend"
 
+	"gnark-float/float2"
 	"gnark-float/gadget"
 	"gnark-float/hint"
-	"gnark-float/util"
 )
+
+var Null FloatVar
+var Pow2 []frontend.Variable
 
 type Context struct {
 	Api          frontend.API
 	Gadget       *gadget.IntGadget
 	E            uint     // The number of bits in the encoded exponent, 8
 	M            uint     // The number of bits in the encoded mantissa, 23
-	E_MAX        *big.Int // 128
-	E_NORMAL_MIN *big.Int // -126
-	E_MIN        *big.Int // -150
+	E_MAX        *big.Int //  128,  1024, abnormal
+	E_NORMAL_MIN *big.Int // -126, -1022, min normal
+	E_MIN        *big.Int // -150, -1075, zero
 }
 
-// `FloatVar` represents an IEEE-754 floating point number in the constraint system,
-// where the number is encoded as a 1-bit sign, an E-bit exponent, and an M-bit mantissa.
-// In the circuit, we don't store the encoded form, but directly record all the components,
-// together with a flag indicating whether the number is abnormal (NaN or infinity).
 type FloatVar struct {
-	// `Sign` is true if and only if the number is negative.
-	Sign frontend.Variable
-	// `Exponent` is the unbiased Exponent of the number.
-	// The biased Exponent is in the range `[0, 2^E - 1]`, and the unbiased Exponent should be
-	// in the range `[-2^(E - 1) + 1, 2^(E - 1)]`.
-	// However, to save constraints in subsequent operations, we shift the mantissa of a
-	// subnormal number to the left so that the most significant bit of the mantissa is 1,
-	// and the Exponent is decremented accordingly.
-	// Therefore, the minimum Exponent is actually `-2^(E - 1) + 1 - M`, and our Exponent
-	// is in the range `[-2^(E - 1) + 1 - M, 2^(E - 1)]`.
-	Exponent frontend.Variable
-	// `Mantissa` is the Mantissa of the number with explicit leading 1, and hence is either
-	// 0 or in the range `[2^M, 2^(M + 1) - 1]`.
-	// This is true even for subnormal numbers, where the Mantissa is shifted to the left
-	// to make the most significant bit 1.
-	// To save constraints when handling NaN, we set the Mantissa of NaN to 0.
-	Mantissa frontend.Variable
-	// `IsAbnormal` is true if and only if the number is NaN or infinity.
+	Sign       frontend.Variable
+	Exponent   frontend.Variable
+	Mantissa   frontend.Variable
 	IsAbnormal frontend.Variable
 }
 
 // 使用单精度还是双精度
 // range_size=8, E=8, M=23
 func NewContext(api frontend.API, range_size uint, E, M uint) Context {
-	E_MAX := new(big.Int).Lsh(big.NewInt(1), E-1)                   //128
-	E_NORMAL_MIN := new(big.Int).Sub(big.NewInt(2), E_MAX)          //-126
-	E_MIN := new(big.Int).Sub(E_NORMAL_MIN, big.NewInt(int64(M+1))) //-150
+	E_MIN := new(big.Int).SetUint64(0)                        //-150=>0,  -1075=>0
+	E_NORMAL_MIN := new(big.Int).SetUint64(uint64(M + 1))     //-126+150, -1022+1075
+	E_MAX := new(big.Int).SetUint64(uint64(M + (1 << E) - 1)) // 128+150,  1024+1075
+
+	Null = FloatVar{
+		Sign:       0,
+		Exponent:   E_MAX,
+		Mantissa:   0,
+		IsAbnormal: 1,
+	}
+
+	Pow2 = make([]frontend.Variable, M+3)
+	for i := 0; i < int(M+3); i++ {
+		Pow2[i] = 1 << i
+	}
+
 	return Context{
 		Api: api,
 		// Gadget:       gadget.New(api, range_size, M+E+1),
@@ -64,114 +61,9 @@ func NewContext(api frontend.API, range_size uint, E, M uint) Context {
 	}
 }
 
-// Allocate a variable in the constraint system from a value.
-// This function decomposes the value into sign, exponent, and mantissa,
-// and enforces they are well-formed.
-// v => (s, e, m, a)
-func (f *Context) NewFloat(v frontend.Variable) FloatVar {
-	// Extract sign, exponent, and mantissa from the value
-	outputs, err := f.Api.Compiler().NewHint(hint.DecodeFloatHint, 2, v, f.E, f.M)
-	if err != nil {
-		panic(err)
-	}
-	s := outputs[0]
-	e := outputs[1]
-	/***************证明(v, s, e, m)的正确性***********************/
-	//v - s * (1 << (E + M)) - e * (1 << M) = m
-	m := f.Api.Sub(v, f.Api.Add(f.Api.Mul(s, new(big.Int).Lsh(big.NewInt(1), f.E+f.M)), f.Api.Mul(e, new(big.Int).Lsh(big.NewInt(1), f.M))))
-
-	// Enforce the bit length of sign, exponent and mantissa
-	f.Api.AssertIsBoolean(s)
-	f.Gadget.AssertBitLength(e, f.E, gadget.TightForUnknownRange)
-	f.Gadget.AssertBitLength(m, f.M, gadget.TightForUnknownRange)
-
-	exponent_min := new(big.Int).Sub(f.E_NORMAL_MIN, big.NewInt(1)) //-127
-	exponent_max := f.E_MAX                                         //128
-
-	// Compute the unbiased exponent, e - 127
-	exponent := f.Api.Add(e, exponent_min)
-
-	mantissa_is_zero := f.Api.IsZero(m)                                //m == 0
-	mantissa_is_not_zero := f.Api.Sub(big.NewInt(1), mantissa_is_zero) // 1- m
-	f.Api.Compiler().MarkBoolean(mantissa_is_not_zero)
-	exponent_is_min := f.Gadget.IsEq(exponent, exponent_min) //e == 0
-	exponent_is_max := f.Gadget.IsEq(exponent, exponent_max) //e == 255
-
-	// Find how many bits to shift the mantissa to the left to have the `(M - 1)`-th bit equal to 1
-	// and prodive it as a hint to the circuit
-	outputs, err = f.Api.Compiler().NewHint(hint.NormalizeHint, 1, m, f.M)
-	if err != nil {
-		panic(err)
-	}
-	shift := outputs[0]
-	// Enforce that `shift` is small and `two_to_shift` is equal to `2^shift`.
-	// Theoretically, `shift` should be in the range `[0, M]`, but the circuit can only guarantee
-	// that `shift` is in the range `[0, M + E]`.
-	// However, we will check the range of `shifted_mantissa` later, which will implicitly provide
-	// tight upper bounds for `shift` and `two_to_shift`, and thus soundness still holds.
-	f.Gadget.AssertBitLength(shift, uint(big.NewInt(int64(f.M)).BitLen()), gadget.Loose)
-	two_to_shift := f.Gadget.QueryPowerOf2(shift)
-
-	// Compute the shifted mantissa. Multiplication here is safe because we already know that
-	// mantissa is less than `2^M`, and `2^shift` is less than or equal to `2^(M + E)`. If `M` is
-	// not too large, overflow should not happen.
-	shifted_mantissa := f.Api.Mul(m, two_to_shift)
-	// Enforce the shifted mantissa, after removing the leading bit, has only `M - 1` bits,
-	// where the leading bit is set to 0 if the mantissa is zero, and set to 1 otherwise.
-	// This does not bound the value of `shift` if the mantissa is zero, but it is fine since
-	// `shift` is not used in this case.
-	// On the other hand, if the mantissa is not zero, then this implies that:
-	// 1. `shift` is indeed the left shift count that makes the `(M - 1)`-th bit 1, since otherwise,
-	// `shifted_mantissa - F::from(1u128 << (M - 1))` will underflow to a negative number, which
-	// takes `F::MODULUS_BIT_SIZE > M - 1` bits to represent.
-	// 2. `shifted_mantissa` is less than `2^M`, since otherwise,
-	// `shifted_mantissa - F::from(1u128 << (M - 1))` will be greater than `2^(M - 1) - 1`, which
-	// takes at least `M` bits to represent.
-	f.Gadget.AssertBitLength(
-		f.Api.Sub(
-			shifted_mantissa,
-			f.Api.Mul(mantissa_is_not_zero, new(big.Int).Lsh(big.NewInt(1), f.M-1)),
-		),
-		f.M-1,
-		gadget.TightForSmallAbs,
-	)
-
-	exponent =
-		f.Api.Select(
-			exponent_is_min,
-			f.Api.Select(
-				mantissa_is_zero,
-				// If zero, set the exponent to 0's exponent
-				f.Api.Sub(exponent_min, f.M),
-				// If subnormal, decrement the exponent by `shift`
-				f.Api.Sub(exponent, shift),
-			),
-			// Otherwise, keep the exponent unchanged
-			exponent,
-		)
-	mantissa := f.Api.Select(
-		exponent_is_min,
-		// If subnormal, shift the mantissa to the left by 1 to make its `M`-th bit 1
-		f.Api.Add(shifted_mantissa, shifted_mantissa),
-		f.Api.Select(
-			f.Api.And(exponent_is_max, mantissa_is_not_zero),
-			// If NaN, set the mantissa to 0
-			big.NewInt(0),
-			// Otherwise, add `2^M` to the mantissa to make its `M`-th bit 1
-			f.Api.Add(m, new(big.Int).Lsh(big.NewInt(1), f.M)),
-		),
-	)
-
-	return FloatVar{
-		Sign:       s,
-		Exponent:   exponent,
-		Mantissa:   mantissa,
-		IsAbnormal: exponent_is_max,
-	}
-}
-func NewF32ConstantFromInt(v uint64) FloatVar {
-	components := util.ComponentsOf(v, uint64(8), uint64(23))
-
+// 将f32的bits转化为FloatVar
+func NewF32ConstantFromInt(v uint32) FloatVar {
+	components := ComponentsOf(uint64(v), uint64(8), uint64(23))
 	return FloatVar{
 		Sign:       components[0],
 		Exponent:   components[1],
@@ -180,42 +72,9 @@ func NewF32ConstantFromInt(v uint64) FloatVar {
 	}
 }
 
+// 将f32转化为FloatVar
 func NewF32ConstantFromFloat(v float32) FloatVar {
-	components := util.ComponentsOf(uint64(math.Float32bits(v)), 8, 23)
-	return FloatVar{
-		Sign:       components[0],
-		Exponent:   components[1],
-		Mantissa:   components[2],
-		IsAbnormal: components[3],
-	}
-}
-
-// func ResolveF32(v FloatVar) float32 {
-// 	// a, _ := frontend.API.ConstantValue(v.Sign)
-// 	// b, _ := frontend.API.ConstantValue(v.Exponent)
-// 	// c, _ := frontend.API.ConstantValue(v.Mantissa)
-// 	// d, _ := frontend.API.ConstantValue(v.IsAbnormal)
-// 	// return util.ComponentsToF32(
-// 	// 	[]*big.Int{
-// 	// 		a, b, c, d,
-// 	// 	},
-// 	// )
-
-// 	var a = v.Exponen
-// }
-
-func (f *Context) NewF32Constant(v float32) FloatVar {
-	return f.NewConstant(uint64(math.Float32bits(v)))
-}
-
-func (f *Context) NewF64Constant(v float64) FloatVar {
-	return f.NewConstant(math.Float64bits(v))
-}
-
-// Allocate a constant in the constraint system.
-func (f *Context) NewConstant(v uint64) FloatVar {
-	components := util.ComponentsOf(v, uint64(f.E), uint64(f.M))
-
+	components := ComponentsOf(uint64(math.Float32bits(v)), 8, 23)
 	return FloatVar{
 		Sign:       components[0],
 		Exponent:   components[1],
@@ -439,38 +298,7 @@ func (f *Context) AssertIsEqualOrCustomULP32(x, y FloatVar, ulp float32) {
 		y.Sign,
 	))
 
-	ulpFloat := f.NewF32Constant(ulp)
-
-	cmp := f.IsLe(f.Abs(f.Sub(x, y)), ulpFloat)
-
-	condOne := f.Gadget.IsEq(cmp, 1)
-
-	equalityOne := f.Gadget.IsEq(f.Api.Sub(x.Exponent, y.Exponent), 0)
-	equalityTwo := f.Gadget.IsEq(x.Mantissa, y.Mantissa)
-	equalityThree := f.Gadget.IsEq(x.IsAbnormal, y.IsAbnormal)
-
-	condTwo := f.Api.And(equalityOne, f.Api.And(equalityTwo, equalityThree))
-
-	f.Api.AssertIsEqual(f.Api.Or(condOne, condTwo), 1)
-}
-
-// Enforce the equality between two numbers, relaxed to checking ULP <X
-func (f *Context) AssertIsEqualOrCustomULP64(x, y FloatVar, ulp float64) {
-	is_nan := f.Api.Or(
-		f.Api.And(x.IsAbnormal, f.Api.IsZero(x.Mantissa)),
-		f.Api.And(y.IsAbnormal, f.Api.IsZero(y.Mantissa)),
-	)
-	f.Api.AssertIsEqual(f.Api.Select(
-		is_nan,
-		0,
-		x.Sign,
-	), f.Api.Select(
-		is_nan,
-		0,
-		y.Sign,
-	))
-
-	ulpFloat := f.NewF64Constant(ulp)
+	ulpFloat := NewF32ConstantFromFloat(ulp)
 
 	cmp := f.IsLe(f.Abs(f.Sub(x, y)), ulpFloat)
 
@@ -487,6 +315,10 @@ func (f *Context) AssertIsEqualOrCustomULP64(x, y FloatVar, ulp float64) {
 
 // Add two numbers.
 func (f *Context) Add(x, y FloatVar) FloatVar {
+	// ret := FloatVar{}
+
+	// f.Select(f.Api.Or(x.IsAbnormal, y.IsAbnormal))
+
 	// Compute `y.exponent - x.exponent`'s absolute value and sign.
 	// Since `delta` is the absolute value, `delta >= 0`.
 	delta, ex_le_ey := f.Gadget.Abs(f.Api.Sub(y.Exponent, x.Exponent), f.E+1)
@@ -547,11 +379,11 @@ func (f *Context) Add(x, y FloatVar) FloatVar {
 	// and `ww << (M + 3)` has `E_NORMAL_MIN - y.exponent + M + 3` trailing 0s.
 	// This implies that `s` also has `E_NORMAL_MIN - y.exponent + M + 3` trailing 0s.
 	// Generally, `s` should have `max(E_NORMAL_MIN - max(x.exponent, y.exponent), 0) + M + 3` trailing 0s.
-	s := f.Api.Add(f.Api.Mul(zz, two_to_delta), f.Api.Mul(ww, new(big.Int).Lsh(big.NewInt(1), f.M+3))) /*这里可以修改M+3->M+2*/
+	s := f.Api.Add(f.Api.Mul(zz, two_to_delta), f.Api.Mul(ww, new(big.Int).Lsh(big.NewInt(1), f.M+3)))
 
 	// The shift count is at most `M + 3`, and both `zz` and `ww` have `M + 1` bits, hence the result has at most
 	// `(M + 3) + (M + 1) + 1` bits, where 1 is the possible carry.
-	mantissa_bit_length := (f.M + 3) + (f.M + 1) + 1 /*这里可以修改M+3->M+2*/
+	mantissa_bit_length := (f.M + 3) + (f.M + 1) + 1
 
 	// Get the sign of the mantissa and find how many bits to shift the mantissa to the left to have the
 	// `mantissa_bit_length - 1`-th bit equal to 1.
@@ -1240,4 +1072,20 @@ func (f *Context) Shift(x FloatVar, e frontend.Variable) FloatVar {
 		IsAbnormal: is_abnormal,
 	}
 	return f.Select(f.Api.Or(m_is_zero, x.IsAbnormal), x, ret)
+}
+
+/**
+*  0 <= offset < 2^length
+*  length <= M+2
+**/
+func LeftShift(api frontend.API, v frontend.Variable, offset frontend.Variable, length int) frontend.Variable {
+	outputs, err := api.Compiler().NewHint(hint.BitsHint, length, offset, big.NewInt(int64(length)))
+	if err != nil {
+		panic(err)
+	}
+	var power_2offset frontend.Variable = 0
+	for i := 0; i < length; i++ {
+		power_2offset = api.Add(power_2offset, api.Mul(float2.Pow2[i], outputs[i]))
+	}
+	return api.Mul(power_2offset, v)
 }
